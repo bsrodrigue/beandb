@@ -1,12 +1,12 @@
 #include <errno.h>
 #include <fcntl.h>
+#include <stdbool.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
-#include <stdbool.h>
 
 #define COLUMN_USERNAME_SIZE 32
 #define COLUMN_EMAIL_SIZE 255
@@ -32,6 +32,8 @@ typedef enum {
   STATEMENT_INSERT,
   STATEMENT_SELECT,
 } StatementType;
+
+typedef enum { NODE_INTERNAL, NODE_LEAF } NodeType;
 
 typedef struct {
   uint32_t id;
@@ -80,6 +82,58 @@ const uint32_t ROW_SIZE = ID_SIZE + USERNAME_SIZE + EMAIL_SIZE;
 const uint32_t PAGE_SIZE = 4096;
 const uint32_t ROWS_PER_PAGE = PAGE_SIZE / ROW_SIZE;
 const uint32_t TABLE_MAX_ROWS = ROWS_PER_PAGE * TABLE_MAX_PAGES;
+
+/*
+ *  Common Node Header Layout
+ */
+const uint32_t NODE_TYPE_SIZE = sizeof(uint8_t);
+const uint32_t NODE_TYPE_OFFSET = 0;
+const uint32_t IS_ROOT_SIZE = sizeof(uint8_t);
+const uint32_t IS_ROOT_OFFSET = NODE_TYPE_SIZE;
+const uint32_t PARENT_POINTER_SIZE = sizeof(uint32_t);
+const uint32_t PARENT_POINTER_OFFSET = IS_ROOT_OFFSET + IS_ROOT_SIZE;
+const uint8_t COMMON_NODE_HEADER_SIZE =
+    NODE_TYPE_SIZE + IS_ROOT_SIZE + PARENT_POINTER_SIZE;
+
+/*
+ * Leaf Node Header Layout
+ */
+const uint32_t LEAF_NODE_NUM_CELLS_SIZE = sizeof(uint32_t);
+const uint32_t LEAF_NODE_NUM_CELLS_OFFSET = COMMON_NODE_HEADER_SIZE;
+const uint32_t LEAF_NODE_HEADER_SIZE =
+    COMMON_NODE_HEADER_SIZE + LEAF_NODE_NUM_CELLS_SIZE;
+
+/*
+ * Leaf Node Body Layout
+ */
+const uint32_t LEAF_NODE_KEY_SIZE = sizeof(uint32_t);
+const uint32_t LEAF_NODE_KEY_OFFSET = 0;
+const uint32_t LEAF_NODE_VALUE_SIZE = ROW_SIZE;
+const uint32_t LEAF_NODE_VALUE_OFFSET =
+    LEAF_NODE_KEY_OFFSET + LEAF_NODE_KEY_SIZE;
+
+const uint32_t LEAF_NODE_CELL_SIZE = LEAF_NODE_KEY_SIZE + LEAF_NODE_VALUE_SIZE;
+const uint32_t LEAF_NODE_SPACE_FOR_CELLS = PAGE_SIZE - LEAF_NODE_HEADER_SIZE;
+const uint32_t LEAF_NODE_MAX_CELLS =
+    LEAF_NODE_SPACE_FOR_CELLS / LEAF_NODE_CELL_SIZE;
+
+uint32_t *leaf_node_num_cells(void *node) {
+  return node + LEAF_NODE_NUM_CELLS_OFFSET;
+}
+
+void *leaf_node_cell(void *node, uint32_t cell_num) {
+  return node + LEAF_NODE_HEADER_SIZE + cell_num * LEAF_NODE_CELL_SIZE;
+}
+
+uint32_t *leaf_node_key(void *node, uint32_t cell_num) {
+  return leaf_node_cell(node, cell_num);
+}
+
+void *leaf_node_value(void *node, uint32_t cell_num) {
+  return leaf_node_cell(node, cell_num) + LEAF_NODE_KEY_SIZE;
+}
+
+void initialize_leaf_node(void *node) { *leaf_node_num_cells(node) = 0; }
 
 void print_row(Row *row) {
   printf("(%d, %s, %s)\n", row->id, row->username, row->email);
@@ -197,7 +251,7 @@ void *get_page(Pager *pager, uint32_t page_num) {
   return pager->pages[page_num];
 }
 
-void *cursor_value(Cursor* cursor) {
+void *cursor_value(Cursor *cursor) {
   uint32_t row_num = cursor->row_num;
   uint32_t page_num = row_num / ROWS_PER_PAGE;
 
@@ -208,11 +262,11 @@ void *cursor_value(Cursor* cursor) {
   return page + byte_offset;
 }
 
-void cursor_advance(Cursor* cursor){
+void cursor_advance(Cursor *cursor) {
   cursor->row_num += 1;
 
   if (cursor->row_num >= cursor->table->num_rows) {
-    cursor->end_of_table = true; 
+    cursor->end_of_table = true;
   }
 }
 
@@ -249,8 +303,8 @@ Table *db_open(const char *filename) {
   return table;
 }
 
-Cursor* table_start(Table* table){
-  Cursor* cursor = malloc(sizeof(Cursor));
+Cursor *table_start(Table *table) {
+  Cursor *cursor = malloc(sizeof(Cursor));
   cursor->table = table;
   cursor->row_num = 0;
   cursor->end_of_table = (table->num_rows == 0);
@@ -258,8 +312,8 @@ Cursor* table_start(Table* table){
   return cursor;
 }
 
-Cursor* table_end(Table* table){
-  Cursor* cursor = malloc(sizeof(Cursor));
+Cursor *table_end(Table *table) {
+  Cursor *cursor = malloc(sizeof(Cursor));
   cursor->table = table;
   cursor->row_num = table->num_rows;
   cursor->end_of_table = true;
@@ -364,7 +418,7 @@ ExecuteResult execute_insert(Statement *statement, Table *table) {
 
   Row *row_to_insert = &(statement->row_to_insert);
 
-  Cursor* cursor = table_end(table);
+  Cursor *cursor = table_end(table);
 
   serialize_row(row_to_insert, cursor_value(cursor));
   table->num_rows += 1;
@@ -375,9 +429,8 @@ ExecuteResult execute_insert(Statement *statement, Table *table) {
 }
 
 ExecuteResult execute_select(Statement *statement, Table *table) {
-  Cursor* cursor = table_start(table);
+  Cursor *cursor = table_start(table);
   Row row;
-
 
   while (!cursor->end_of_table) {
     deserialize_row(cursor_value(cursor), &row);
@@ -401,8 +454,9 @@ ExecuteResult execute_statement(Statement *statement, Table *table) {
 }
 
 int main(int argc, char *argv[]) {
+
   if (argc < 2) {
-    printf("Must supply a database filename.\n");
+    printf("beandb: no database file provided.\n");
     exit(EXIT_FAILURE);
   }
 
